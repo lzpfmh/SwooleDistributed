@@ -4,7 +4,7 @@ namespace Server\CoreBase;
 /**
  * 控制器工厂模式
  * Created by PhpStorm.
- * User: tmtbe
+ * User: zhangjincheng
  * Date: 16-7-15
  * Time: 下午12:03
  */
@@ -44,21 +44,22 @@ class ControllerFactory
     public function getController($controller)
     {
         if ($controller == null) return null;
-        if (!key_exists($controller, $this->pool)) {
-            $this->pool[$controller] = new \SplQueue();
+        $controllers = $this->pool[$controller]??null;
+        if ($controllers == null) {
+            $controllers = $this->pool[$controller] = new \SplQueue();
         }
-        if (count($this->pool[$controller]) > 0) {
-            $controller_instance = $this->pool[$controller]->shift();
+        if (!$controllers->isEmpty()) {
+            $controller_instance = $controllers->shift();
             $controller_instance->reUse();
             return $controller_instance;
         }
-        $class_name = "\\app\\Controllers\\$controller";
+        $class_name = "app\\Controllers\\$controller";
         if (class_exists($class_name)) {
             $controller_instance = new $class_name;
             $controller_instance->core_name = $controller;
             return $controller_instance;
         } else {
-            $class_name = "\\Server\\Controllers\\$controller";
+            $class_name = "Server\\Controllers\\$controller";
             if (class_exists($class_name)) {
                 $controller_instance = new $class_name;
                 $controller_instance->core_name = $controller;

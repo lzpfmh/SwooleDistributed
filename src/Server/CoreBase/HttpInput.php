@@ -1,7 +1,7 @@
 <?php
 /**
  * Created by PhpStorm.
- * User: tmtbe
+ * User: zhangjincheng
  * Date: 16-7-29
  * Time: 上午11:02
  */
@@ -18,8 +18,7 @@ class HttpInput
     public $request;
 
     /**
-     * 设置
-     * @param $response
+     * @param $request
      */
     public function set($request)
     {
@@ -35,12 +34,12 @@ class HttpInput
     }
 
     /**
-     * post_get
+     * postGet
      * @param $index
      * @param $xss_clean
      * @return string
      */
-    public function post_get($index, $xss_clean = true)
+    public function postGet($index, $xss_clean = true)
     {
         return isset($this->request->post[$index])
             ? $this->post($index, $xss_clean)
@@ -78,12 +77,12 @@ class HttpInput
     }
 
     /**
-     * get_post
+     * getPost
      * @param $index
      * @param $xss_clean
      * @return string
      */
-    public function get_post($index, $xss_clean = true)
+    public function getPost($index, $xss_clean = true)
     {
         return isset($this->request->get[$index])
             ? $this->get($index, $xss_clean)
@@ -99,6 +98,20 @@ class HttpInput
     }
 
     /**
+     * @param $index
+     * @param bool $xss_clean
+     * @return array|bool|string
+     */
+    public function header($index, $xss_clean = true)
+    {
+        if ($xss_clean) {
+            return XssClean::getXssClean()->xss_clean($this->request->header[$index]??'');
+        } else {
+            return $this->request->header[$index]??'';
+        }
+    }
+
+    /**
      * getAllHeader
      * @return array
      */
@@ -111,7 +124,7 @@ class HttpInput
      * 获取原始的POST包体
      * @return mixed
      */
-    public function get_rawContent()
+    public function getRawContent()
     {
         return $this->request->rawContent();
     }
@@ -132,17 +145,60 @@ class HttpInput
     }
 
     /**
-     * get_request_header
+     * getRequestHeader
      * @param $index
      * @param $xss_clean
      * @return string
      */
-    public function get_request_header($index, $xss_clean = true)
+    public function getRequestHeader($index, $xss_clean = true)
     {
         if ($xss_clean) {
             return XssClean::getXssClean()->xss_clean($this->request->header[$index]??'');
         } else {
             return $this->request->header[$index]??'';
         }
+    }
+
+    /**
+     * 获取Server相关的数据
+     * @param $index
+     * @param bool $xss_clean
+     * @return array|bool|string
+     */
+    public function server($index, $xss_clean = true)
+    {
+        if ($xss_clean) {
+            return XssClean::getXssClean()->xss_clean($this->request->server[$index]??'');
+        } else {
+            return $this->request->server[$index]??'';
+        }
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getRequestMethod()
+    {
+        return $this->request->server['request_method'];
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getRequestUri()
+    {
+        if (array_key_exists('query_string', $this->request->server)) {
+            return $this->request->server['request_uri'] . "?" . $this->request->server['query_string'];
+        } else {
+            return $this->request->server['request_uri'];
+        }
+    }
+
+    /**
+     * @return mixed
+     */
+    public function getPathInfo()
+    {
+        return $this->request->server['path_info'];
     }
 }

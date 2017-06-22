@@ -1,33 +1,45 @@
 <?php
 namespace Server;
 
+use Gelf\Publisher;
+use Monolog\Handler\GelfHandler;
 use Monolog\Handler\RotatingFileHandler;
 use Monolog\Logger;
 use Noodlehaus\Config;
+use Server\Components\GrayLog\UdpTransport;
 use Server\CoreBase\Child;
 use Server\CoreBase\ControllerFactory;
-use Server\CoreBase\Coroutine;
-use Server\CoreBase\GeneratorContext;
 use Server\CoreBase\Loader;
 use Server\CoreBase\SwooleException;
+use Server\Coroutine\Coroutine;
 use Server\Pack\IPack;
 use Server\Route\IRoute;
 
 /**
  * Created by PhpStorm.
- * User: tmtbe
+ * User: zhangjincheng
  * Date: 16-6-28
  * Time: 上午11:37
  */
 abstract class SwooleServer extends Child
 {
-    const version = "1.3.3";
+    const version = "2.0.7";
     /**
      * Daemonize.
      *
      * @var bool
      */
     public static $daemonize = false;
+    /**
+     * 单元测试
+     * @var bool
+     */
+    public static $testUnity = false;
+    /**
+     * 单元测试文件目录
+     * @var string
+     */
+    public static $testUnityDir = '';
     /**
      * The file to store master process PID.
      *
@@ -65,11 +77,6 @@ abstract class SwooleServer extends Child
      */
     protected static $_maxShowLength = 12;
     /**
-     * 协程调度器
-     * @var Coroutine
-     */
-    public $coroutine;
-    /**
      * server name
      * @var string
      */
@@ -88,6 +95,13 @@ abstract class SwooleServer extends Child
     public $socket_name;
     public $port;
     public $socket_type;
+
+    /**
+     * 服务器到现在的毫秒数
+     * @var int
+     */
+    public $tickTime;
+
     /**
      * 封包器
      * @var IPack
@@ -127,6 +141,22 @@ abstract class SwooleServer extends Child
      * @var bool
      */
     public $tcp_enable;
+
+    /**
+     * @var
+     */
+    public $package_length_type;
+
+    /**
+     * @var int
+     */
+    public $package_length_type_length;
+
+    /**
+     * @var
+     */
+    public $package_body_offset;
+
     /**
      * 协议设置
      * @var
@@ -138,24 +168,52 @@ abstract class SwooleServer extends Child
         'package_max_length' => 2000000,  //协议最大长度)
     ];
 
+    /**
+     * 是否需要协程支持(默认开启)
+     * @var bool
+     */
+    protected $needCoroutine = true;
+
+    /**
+     * 设置monolog的loghandler
+     */
+    public function setLogHandler()
+    {
+        $this->log = new Logger($this->config->get('log.log_name', 'SD'));
+        switch ($this->config['log']['active'])
+        {
+            case "graylog":
+                $this->log->setHandlers([new GelfHandler(new Publisher(new UdpTransport($this->config['log']['graylog']['ip'],$this->config['log']['graylog']['port'])),
+                    $this->config['log']['log_level'])]);
+                break;
+            case "file":
+                $this->log->pushHandler(new RotatingFileHandler(__DIR__ . $this->config['log']['file']['log_path'] . $this->name . '.log',
+                    $this->config['log']['file']['log_max_files'],
+                    $this->config['log']['log_level']));
+                break;
+        }
+    }
+
     public function __construct()
     {
+        $this->onErrorHandel = [$this, 'onErrorHandel'];
         self::$_worker = $this;
         // 加载配置
         $this->config = new Config(__DIR__ . '/../config');
+        $this->probuf_set = $this->config->get('server.probuf_set', $this->probuf_set);
+        $this->package_length_type = $this->probuf_set['package_length_type']??'N';
+        $this->package_length_type_length = strlen(pack($this->package_length_type, 1))??0;
+        $this->package_body_offset = $this->probuf_set['package_body_offset']??0;
         $this->setConfig();
-        $this->log = new Logger($this->name);
-        $this->log->pushHandler(new RotatingFileHandler(__DIR__ . $this->config['server']['log_path'] . $this->name . '.log',
-            $this->config['server']['log_max_files'],
-            $this->config['server']['log_level']));
+        $this->setLogHandler();
         register_shutdown_function(array($this, 'checkErrors'));
         set_error_handler(array($this, 'displayErrorHandler'));
         //pack class
-        $pack_class_name = "\\app\\Pack\\" . $this->config['server']['pack_tool'];
+        $pack_class_name = "app\\Pack\\" . $this->config['server']['pack_tool'];
         if (class_exists($pack_class_name)) {
             $this->pack = new $pack_class_name;
         } else {
-            $pack_class_name = "\\Server\\Pack\\" . $this->config['server']['pack_tool'];
+            $pack_class_name = "Server\\Pack\\" . $this->config['server']['pack_tool'];
             if (class_exists($pack_class_name)) {
                 $this->pack = new $pack_class_name;
             } else {
@@ -163,11 +221,11 @@ abstract class SwooleServer extends Child
             }
         }
         //route class
-        $route_class_name = "\\app\\Route\\" . $this->config['server']['route_tool'];
+        $route_class_name = "app\\Route\\" . $this->config['server']['route_tool'];
         if (class_exists($route_class_name)) {
             $this->route = new $route_class_name;
         } else {
-            $route_class_name = "\\Server\\Route\\" . $this->config['server']['route_tool'];
+            $route_class_name = "Server\\Route\\" . $this->config['server']['route_tool'];
             if (class_exists($route_class_name)) {
                 $this->route = new $route_class_name;
             } else {
@@ -267,7 +325,7 @@ abstract class SwooleServer extends Child
         // Check argv;
         $start_file = $argv[0];
         if (!isset($argv[1])) {
-            exit("Usage: php yourfile.php {start|stop|reload|restart}\n");
+            exit("Usage: php yourfile.php {start|stop|reload|restart|test}\n");
         }
 
         // Get command.
@@ -283,7 +341,7 @@ abstract class SwooleServer extends Child
                 $mode = 'in DEBUG mode';
             }
         }
-        echo("Swoole[$start_file] $command $mode");
+        echo("Swoole[$start_file] $command $mode \n");
         if (file_exists(self::$pidFile)) {
             $pids = explode(',', file_get_contents(self::$pidFile));
             // Get master process PID.
@@ -295,12 +353,12 @@ abstract class SwooleServer extends Child
         }
         // Master is still alive?
         if ($master_is_alive) {
-            if ($command === 'start') {
-                echo("Swoole[$start_file] already running");
+            if ($command === 'start' || $command === 'test') {
+                echo("Swoole[$start_file] already running\n");
                 exit;
             }
-        } elseif ($command !== 'start') {
-            echo("Swoole[$start_file] not run");
+        } elseif ($command !== 'start' && $command !== 'test') {
+            echo("Swoole[$start_file] not run\n");
             exit;
         }
 
@@ -313,7 +371,7 @@ abstract class SwooleServer extends Child
                 break;
             case 'stop':
                 @unlink(self::$pidFile);
-                echo("Swoole[$start_file] is stoping ...");
+                echo("Swoole[$start_file] is stoping ...\n");
                 // Send stop signal to master process.
                 $master_pid && posix_kill($master_pid, SIGTERM);
                 // Timeout.
@@ -325,7 +383,7 @@ abstract class SwooleServer extends Child
                     if ($master_is_alive) {
                         // Timeout?
                         if (time() - $start_time >= $timeout) {
-                            echo("Swoole[$start_file] stop fail");
+                            echo("Swoole[$start_file] stop fail\n");
                             exit;
                         }
                         // Waiting amoment.
@@ -333,18 +391,18 @@ abstract class SwooleServer extends Child
                         continue;
                     }
                     // Stop success.
-                    echo("Swoole[$start_file] stop success");
+                    echo("Swoole[$start_file] stop success\n");
                     break;
                 }
                 exit(0);
                 break;
             case 'reload':
                 posix_kill($manager_pid, SIGUSR1);
-                echo("Swoole[$start_file] reload");
+                echo("Swoole[$start_file] reload\n");
                 exit;
             case 'restart':
                 @unlink(self::$pidFile);
-                echo("Swoole[$start_file] is stoping ...");
+                echo("Swoole[$start_file] is stoping ...\n");
                 // Send stop signal to master process.
                 $master_pid && posix_kill($master_pid, SIGTERM);
                 // Timeout.
@@ -356,7 +414,7 @@ abstract class SwooleServer extends Child
                     if ($master_is_alive) {
                         // Timeout?
                         if (time() - $start_time >= $timeout) {
-                            echo("Swoole[$start_file] stop fail");
+                            echo("Swoole[$start_file] stop fail\n");
                             exit;
                         }
                         // Waiting amoment.
@@ -364,13 +422,17 @@ abstract class SwooleServer extends Child
                         continue;
                     }
                     // Stop success.
-                    echo("Swoole[$start_file] stop success");
+                    echo("Swoole[$start_file] stop success\n");
                     break;
                 }
                 self::$daemonize = true;
                 break;
+            case 'test':
+                self::$testUnity = true;
+                self::$testUnityDir = $command2;
+                break;
             default :
-                exit("Usage: php yourfile.php {start|stop|reload|restart}\n");
+                exit("Usage: php yourfile.php {start|stop|reload|restart|test}\n");
         }
     }
 
@@ -416,6 +478,7 @@ abstract class SwooleServer extends Child
         $setConfig = self::$_worker->setServerSet();
         echo "\033[2J";
         echo "\033[1A\n\033[K-------------\033[47;30m SWOOLE_DISTRIBUTED \033[0m--------------\n\033[0m";
+        echo 'System:', PHP_OS, "\n";
         echo 'SwooleDistributed version:', self::version, "\n";
         echo 'Swoole version: ', SWOOLE_VERSION, "\n";
         echo 'PHP version: ', PHP_VERSION, "\n";
@@ -537,19 +600,42 @@ abstract class SwooleServer extends Child
     /**
      * start前的操作
      */
-    abstract public function beforeSwooleStart();
+    public function beforeSwooleStart()
+    {
+
+    }
 
     /**
      * 数据包编码
      * @param $buffer
      * @return string
+     * @throws SwooleException
      */
     public function encode($buffer)
     {
-        $total_length = SwooleMarco::HEADER_LENGTH + strlen($buffer);
-        return pack('N', $total_length) . $buffer;
+        if ($this->probuf_set['open_length_check']??0 == 1) {
+            $total_length = $this->package_length_type_length + strlen($buffer) - $this->package_body_offset;
+            return pack($this->package_length_type, $total_length) . $buffer;
+        } else if ($this->probuf_set['open_eof_check']??0 == 1) {
+            return $buffer . $this->probuf_set['package_eof'];
+        } else {
+            throw new SwooleException("tcpServer won't support set");
+        }
     }
-
+    /**
+     * @param $buffer
+     * @return string
+     */
+    public function unEncode($buffer)
+    {
+        if ($this->probuf_set['open_length_check']??0 == 1) {
+            $data = substr($buffer, $this->package_length_type_length);
+            return $data;
+        } else if ($this->probuf_set['open_eof_check']??0 == 1) {
+            $data = $buffer;
+            return $data;
+        }
+    }
     /**
      * onSwooleStart
      * @param $serv
@@ -569,9 +655,17 @@ abstract class SwooleServer extends Child
      */
     public function onSwooleWorkerStart($serv, $workerId)
     {
+        //清除apc缓存
+        if (function_exists('apc_clear_cache')) {
+            apc_clear_cache();
+        }
         file_put_contents(self::$pidFile, ',' . $serv->worker_pid, FILE_APPEND);
-        if (!$serv->taskworker) {//worker进程启动协程调度器
-            $this->coroutine = new Coroutine();
+        // 重新加载配置
+        $this->config = $this->config->load(__DIR__ . '/../config');
+        if (!$serv->taskworker) {//worker进程
+            if ($this->needCoroutine) {//启动协程调度器
+                Coroutine::init();
+            }
             self::setProcessTitle('SWD-Worker');
         } else {
             self::setProcessTitle('SWD-Tasker');
@@ -594,40 +688,41 @@ abstract class SwooleServer extends Child
      * @param $fd
      * @param $from_id
      * @param $data
+     * @return CoreBase\Controller|void
      */
     public function onSwooleReceive($serv, $fd, $from_id, $data)
     {
-        $data = substr($data, SwooleMarco::HEADER_LENGTH);//去掉头
+        $data = $this->unEncode($data);
         //反序列化，出现异常断开连接
         try {
             $client_data = $this->pack->unPack($data);
         } catch (\Exception $e) {
             $serv->close($fd);
-            return;
+            return null;
         }
         //client_data进行处理
         $client_data = $this->route->handleClientData($client_data);
         $controller_name = $this->route->getControllerName();
         $controller_instance = ControllerFactory::getInstance()->getController($controller_name);
         if ($controller_instance != null) {
-            $uid = $serv->connection_info($fd)['uid']??0;
-            $controller_instance->setClientData($uid, $fd, $client_data);
+            if (SwooleServer::$testUnity) {
+                $fd = 'self';
+                $uid = $fd;
+            } else {
+                $uid = $serv->connection_info($fd)['uid']??0;
+            }
             $method_name = $this->config->get('tcp.method_prefix', '') . $this->route->getMethodName();
+            $controller_instance->setClientData($uid, $fd, $client_data, $controller_name, $method_name);
             try {
-                if (method_exists($controller_instance, $method_name)) {
-                    $generator = call_user_func([$controller_instance, $method_name], $this->route->getParams());
-                    if ($generator instanceof \Generator) {
-                        $generatorContext = new GeneratorContext();
-                        $generatorContext->setController($controller_instance, $controller_name, $method_name);
-                        $this->coroutine->start($generator, $generatorContext);
-                    }
-                } else {
-                    throw new \Exception('method not exists');
+                if (!method_exists($controller_instance, $method_name)) {
+                    $method_name = 'defaultMethod';
                 }
+                Coroutine::startCoroutine([$controller_instance, $method_name], $this->route->getParams());
             } catch (\Exception $e) {
                 call_user_func([$controller_instance, 'onExceptionHandle'], $e);
             }
         }
+        return $controller_instance;
     }
 
     /**
@@ -643,9 +738,9 @@ abstract class SwooleServer extends Child
     /**
      * onSwooleWorkerStop
      * @param $serv
-     * @param $fd
+     * @param $worker_id
      */
-    public function onSwooleWorkerStop($serv, $fd)
+    public function onSwooleWorkerStop($serv, $worker_id)
     {
 
     }
@@ -699,7 +794,7 @@ abstract class SwooleServer extends Child
             'exit_code' => $exit_code];
         $log = "WORKER Error ";
         $log .= json_encode($data);
-        $this->log->error($log);
+        $this->log->alert($log);
         if ($this->onErrorHandel != null) {
             call_user_func($this->onErrorHandel, '【！！！】服务器进程异常退出', $log);
         }
@@ -738,12 +833,14 @@ abstract class SwooleServer extends Child
      * 包装SerevrMessageBody消息
      * @param $type
      * @param $message
+     * @param string $func
      * @return string
      */
-    public function packSerevrMessageBody($type, $message)
+    public function packSerevrMessageBody($type, $message, string $func = null)
     {
         $data['type'] = $type;
         $data['message'] = $message;
+        $data['func'] = $func;
         return serialize($data);
     }
 
@@ -815,7 +912,7 @@ abstract class SwooleServer extends Child
                     if (isset($_SERVER['REQUEST_URI'])) {
                         $log .= '[QUERY] ' . $_SERVER['REQUEST_URI'];
                     }
-                    $this->log->alert($log);
+                    $this->log->error($log);
                     if ($this->onErrorHandel != null) {
                         call_user_func($this->onErrorHandel, '服务器发生崩溃事件', $log);
                     }
@@ -846,10 +943,10 @@ abstract class SwooleServer extends Child
     public function isWebSocket($fd)
     {
         $fdinfo = $this->server->connection_info($fd);
-        if(empty($fdinfo)){
+        if (empty($fdinfo)) {
             throw new \Exception('fd not exist');
         }
-        if (key_exists('websocket_status', $fdinfo) && $fdinfo['websocket_status'] == WEBSOCKET_STATUS_FRAME) {
+        if (array_key_exists('websocket_status', $fdinfo) && $fdinfo['websocket_status'] == WEBSOCKET_STATUS_FRAME) {
             return true;
         }
         return false;
@@ -882,5 +979,17 @@ abstract class SwooleServer extends Child
     public function close($fd)
     {
         $this->server->close($fd);
+    }
+
+
+    /**
+     * 错误处理函数
+     * @param $msg
+     * @param $log
+     */
+    public function onErrorHandel($msg, $log)
+    {
+        print_r($msg . "\n");
+        print_r($log . "\n");
     }
 }

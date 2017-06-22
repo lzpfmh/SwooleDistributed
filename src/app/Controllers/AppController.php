@@ -2,11 +2,16 @@
 namespace app\Controllers;
 
 use app\Models\AppModel;
+use Server\Asyn\HttpClient\HttpClientPool;
+use Server\Asyn\Redis\RedisAsynPool;
+use Server\Asyn\TcpClient\SdTcpRpcPool;
+use Server\Asyn\TcpClient\TcpClientPool;
 use Server\CoreBase\Controller;
+use Server\CoreBase\SwooleException;
 
 /**
  * Created by PhpStorm.
- * User: tmtbe
+ * User: zhangjincheng
  * Date: 16-7-15
  * Time: 下午3:51
  */
@@ -17,21 +22,9 @@ class AppController extends Controller
      */
     public $AppModel;
 
-    /**
-     * http测试
-     */
-    public function http_test()
+    protected function initialization($controller_name, $method_name)
     {
+        parent::initialization($controller_name, $method_name);
         $this->AppModel = $this->loader->model('AppModel', $this);
-        $this->http_output->end($this->AppModel->test());
-    }
-
-    public function http_test_task()
-    {
-        $AppTask = $this->loader->task('AppTask');
-        $AppTask->testTask();
-        $AppTask->startTask(function ($serv, $task_id, $data) {
-            $this->http_output->end($data);
-        });
     }
 }

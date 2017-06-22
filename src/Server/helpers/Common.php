@@ -1,7 +1,7 @@
 <?php
 /**
  * Created by PhpStorm.
- * User: tmtbe
+ * User: zhangjincheng
  * Date: 16-7-15
  * Time: 上午11:38
  */
@@ -23,9 +23,10 @@ function getTickTime()
     return \Server\SwooleDistributedServer::get_instance()->tickTime;
 }
 
-function getMillisecond() {
+function getMillisecond()
+{
     list($t1, $t2) = explode(' ', microtime());
-    return (float)sprintf('%.0f',(floatval($t1)+floatval($t2))*1000);
+    return (float)sprintf('%.0f', (floatval($t1) + floatval($t2)) * 1000);
 }
 
 function shell_read()
@@ -43,10 +44,18 @@ function shell_read()
  * @param $response
  * @return mixed
  */
-function httpEndFile($path, $response)
+function httpEndFile($path, $request, $response)
 {
+    $path = urldecode($path);
     if (!file_exists($path)) {
         return false;
+    }
+    $lastModified = gmdate('D, d M Y H:i:s', filemtime($path)) . ' GMT';
+    //缓存
+    if (isset($request->header['if-modified-since']) && $request->header['if-modified-since'] == $lastModified) {
+        $response->status(304);
+        $response->end();
+        return true;
     }
     $extension = get_extension($path);
     $normalHeaders = get_instance()->config->get("fileHeader.normal", ['Content-Type: application/octet-stream']);
@@ -55,6 +64,7 @@ function httpEndFile($path, $response)
         list($hk, $hv) = explode(': ', $value);
         $response->header($hk, $hv);
     }
+    $response->header('Last-Modified', $lastModified);
     $response->sendfile($path);
     return true;
 }
@@ -67,15 +77,56 @@ function httpEndFile($path, $response)
 function get_extension($file)
 {
     $info = pathinfo($file);
-    return strtolower($info['extension']);
+    return strtolower($info['extension']??'');
 }
 
 /**
- * 获取绝对地址
+ * php在指定目录中查找指定扩展名的文件
  * @param $path
+ * @param $ext
+ * @return array
  */
-function get_www($path)
+function get_files_by_ext($path, $ext)
 {
-    $normal = 'http://localhost:' . get_instance()->config['http_server']['port'];
-    return get_instance()->config->get('http.domain', $normal) . '/' . $path;
+    $files = array();
+    if (is_dir($path)) {
+        $handle = opendir($path);
+        while ($file = readdir($handle)) {
+            if ($file[0] == '.') {
+                continue;
+            }
+            if (is_file($path . $file) and preg_match('/\.' . $ext . '$/', $file)) {
+                $files[] = $file;
+            }
+        }
+        closedir($handle);
+    }
+    return $files;
+}
+
+function getLuaSha1($name)
+{
+    return \Server\Asyn\Redis\RedisLuaManager::getLuaSha1($name);
+}
+
+/**
+ * 检查扩展
+ * @return bool
+ */
+function checkExtension()
+{
+    $check = true;
+    if (!extension_loaded('swoole')) {
+        print_r("[扩展依赖]缺少swoole扩展\n");
+        $check = false;
+    }
+    if (!extension_loaded('redis')) {
+        print_r("[扩展依赖]缺少redis扩展\n");
+        $check = false;
+    }
+    if (!extension_loaded('pdo')) {
+        print_r("[扩展依赖]缺少pdo扩展\n");
+        $check = false;
+    }
+    return $check;
 }

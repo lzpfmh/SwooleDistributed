@@ -1,7 +1,7 @@
 <?php
 /**
  * Created by PhpStorm.
- * User: tmtbe
+ * User: zhangjincheng
  * Date: 16-7-15
  * Time: 下午1:24
  */
@@ -11,6 +11,8 @@ namespace Server\CoreBase;
 
 use Monolog\Logger;
 use Noodlehaus\Config;
+use Server\Asyn\Mysql\MysqlAsynPool;
+use Server\Asyn\Redis\RedisRoute;
 use Server\Pack\IPack;
 
 class CoreBase extends Child
@@ -41,6 +43,22 @@ class CoreBase extends Child
      * @var IPack
      */
     public $pack;
+    /**
+     * @var RedisRoute
+     */
+    public $redis_pool;
+    /**
+     * @var MysqlAsynPool
+     */
+    public $mysql_pool;
+
+    protected $start_run_time;
+
+    /**
+     * 是否开启效率检测
+     * @var bool
+     */
+    protected $isEfficiencyMonitorEnable = false;
 
     /**
      * Task constructor.
@@ -53,6 +71,9 @@ class CoreBase extends Child
             $this->server = get_instance()->server;
             $this->config = get_instance()->config;
             $this->pack = get_instance()->pack;
+            $this->redis_pool = RedisRoute::getInstance();
+            $this->mysql_pool = get_instance()->mysql_pool;
+            $this->isEfficiencyMonitorEnable = $this->config->get("log.{$this->config['log']['active']}.efficiency_monitor_enable", false);
         }
     }
 
@@ -71,5 +92,19 @@ class CoreBase extends Child
     public function reUse()
     {
         $this->is_destroy = false;
+    }
+
+    /**
+     * 打印日志
+     * @param $message
+     * @param int $level
+     */
+    protected function log($message, $level = Logger::DEBUG)
+    {
+        try {
+            $this->logger->addRecord($level, $message, $this->getContext());
+        } catch (\Exception $e) {
+
+        }
     }
 }

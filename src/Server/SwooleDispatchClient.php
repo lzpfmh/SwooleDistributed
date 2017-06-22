@@ -1,13 +1,14 @@
 <?php
 namespace Server;
 
+use Monolog\Handler\RotatingFileHandler;
+use Monolog\Logger;
 use Noodlehaus\Exception;
-use Server\DataBase\AsynPoolManager;
-use Server\DataBase\RedisAsynPool;
+use Server\Asyn\Redis\RedisAsynPool;
 
 /**
  * Created by PhpStorm.
- * User: tmtbe
+ * User: zhangjincheng
  * Date: 16-7-14
  * Time: 上午9:18
  */
@@ -26,21 +27,18 @@ class SwooleDispatchClient extends SwooleServer
      */
     protected $redis_pool;
     /**
-     * @var AsynPoolManager
-     */
-    protected $asnyPoolManager;
-    /**
-     * 异步进程
+     * 连接池
      * @var
      */
-    protected $pool_process;
-
+    private $asynPools;
     /**
      * SwooleDispatchClient constructor.
      */
     public function __construct()
     {
         $this->name = self::SERVER_NAME;
+        //关闭协程
+        $this->needCoroutine = false;
         parent::__construct();
     }
 
@@ -89,23 +87,8 @@ class SwooleDispatchClient extends SwooleServer
     public function setServerSet()
     {
         $set = $this->config['dispatch_server']['set'];
+        $set = array_merge($set, $this->probuf_set);
         return $set;
-    }
-
-    /**
-     * beforeSwooleStart
-     */
-    public function beforeSwooleStart()
-    {
-        //创建redis，mysql异步连接池进程
-        if ($this->config['asyn_process_enable']) {//代表启动单独进程进行管理
-            $this->pool_process = new \swoole_process(function ($process) {
-                $this->asnyPoolManager = new AsynPoolManager($process, $this);
-                $this->asnyPoolManager->event_add();
-                $this->asnyPoolManager->registAsyn(new RedisAsynPool());
-            }, false, 2);
-            $this->server->addProcess($this->pool_process);
-        }
     }
 
     /**
@@ -121,17 +104,18 @@ class SwooleDispatchClient extends SwooleServer
     public function onSwooleWorkerStart($serv, $workerId)
     {
         parent::onSwooleWorkerStart($serv, $workerId);
-        if (!$serv->taskworker) {
-            //异步redis连接池
-            $this->redis_pool = new RedisAsynPool($this->config['dispatch_server']['redis_slave']);
-            $this->redis_pool->worker_init($workerId);
-            //注册
-            $this->asnyPoolManager = new AsynPoolManager($this->pool_process, $this);
-            if (!$this->config['asyn_process_enable']) {
-                $this->asnyPoolManager->no_event_add();
-            }
-            $this->asnyPoolManager->registAsyn($this->redis_pool);
-        }
+        $this->initAsynPools();
+        $this->redis_pool = $this->asynPools['redisPool'];
+    }
+
+    /**
+     * 初始化各种连接池
+     */
+    public function initAsynPools()
+    {
+        $this->asynPools = [
+            'redisPool' => new RedisAsynPool($this->config, 'dispatch')
+        ];
     }
 
     /**
@@ -159,7 +143,12 @@ class SwooleDispatchClient extends SwooleServer
      */
     private function addServerClient($address)
     {
-        if (key_exists(ip2long($address), $this->server_clients)) {
+        $usid = ip2long($address);
+        if (array_key_exists($usid, $this->server_clients)) {
+            $write_data = ['wid' => $this->server->worker_id, 'usid' => $usid];
+            $data = $this->packSerevrMessageBody(SwooleMarco::MSG_TYPE_USID, serialize($write_data));
+            $cli = $this->server_clients[$usid];
+            $cli->send($this->encode($data));
             return;
         }
         $client = new \swoole_client(SWOOLE_TCP, SWOOLE_SOCK_ASYNC);
@@ -188,9 +177,6 @@ class SwooleDispatchClient extends SwooleServer
                 $address = $data['message'];
                 $this->addServerClient($address);
                 break;
-            case SwooleMarco::MSG_TYPE_REDIS_MESSAGE:
-                $this->asnyPoolManager->distribute($data['message']);
-                break;
         }
     }
 
@@ -209,7 +195,7 @@ class SwooleDispatchClient extends SwooleServer
         //心跳包
         $heartData = $this->encode($this->packSerevrMessageBody(SwooleMarco::MSG_TYPE_HEART, null));
         if (!isset($cli->tick)) {
-            $cli->tick = swoole_timer_tick(60000, function () use ($cli, $heartData) {
+            $cli->tick = swoole_timer_tick($this->config['dispatch_heart_time'], function () use ($cli, $heartData) {
                 $cli->send($heartData);
             });
         }
@@ -222,14 +208,14 @@ class SwooleDispatchClient extends SwooleServer
      */
     public function onClientReceive($cli, $client_data)
     {
-        $data = substr($client_data, SwooleMarco::HEADER_LENGTH);
+        $data = $this->unEncode($client_data);
         $unserialize_data = unserialize($data);
         $type = $unserialize_data['type']??'';
         $message = $unserialize_data['message']??'';
         switch ($type) {
             case SwooleMarco::MSG_TYPE_SEND_GROUP://发送群消息
                 //转换为batch
-                $this->redis_pool->hGetAll(SwooleMarco::redis_group_hash_name_prefix . $message['groupId'], function ($uids) use ($message) {
+                $this->redis_pool->sMembers(SwooleMarco::redis_group_hash_name_prefix . $message['groupId'], function ($uids) use ($message) {
                     if ($uids != null && count($uids) > 0) {
                         $this->redis_pool->hMGet(SwooleMarco::redis_uid_usid_hash_name, $uids, function ($usids) use ($message) {
                             $temp_dic = [];
@@ -277,7 +263,7 @@ class SwooleDispatchClient extends SwooleServer
                 break;
             case SwooleMarco::MSG_TYPE_SEND://发送给uid
                 $this->redis_pool->hGet(SwooleMarco::redis_uid_usid_hash_name, $message['uid'], function ($usid) use ($client_data) {
-                    if (empty($usid) || !key_exists($usid, $this->server_clients)) {
+                    if (empty($usid) || !array_key_exists($usid, $this->server_clients)) {
                         return;
                     }
                     $client = $this->server_clients[$usid];
@@ -286,7 +272,7 @@ class SwooleDispatchClient extends SwooleServer
                 break;
             case SwooleMarco::MSG_TYPE_KICK_UID://踢人
                 $usid = $message['usid'];
-                if (empty($usid) || !key_exists($usid, $this->server_clients)) {
+                if (empty($usid) || !array_key_exists($usid, $this->server_clients)) {
                     return;
                 }
                 $client = $this->server_clients[$usid];
@@ -308,6 +294,7 @@ class SwooleDispatchClient extends SwooleServer
         $address = $cli->address;
         unset($this->server_clients[ip2long($cli->address)]);
         unset($cli);
+        //重连
         $this->addServerClient($address);
     }
 
@@ -317,11 +304,22 @@ class SwooleDispatchClient extends SwooleServer
      */
     public function onClientError($cli)
     {
-        print_r("error\n");
         if (isset($cli->tick)) {
             swoole_timer_clear($cli->tick);
         }
         unset($this->server_clients[ip2long($cli->address)]);
         unset($cli);
+    }
+
+    /**
+     * 设置monolog的loghandler
+     */
+    public function setLogHandler()
+    {
+        $this->log = new Logger($this->name);
+        $this->log->pushHandler(new RotatingFileHandler(__DIR__ . $this->config['log']['file']['log_path'] . $this->name . '.log',
+            $this->config['log']['file']['log_max_files'],
+            $this->config['log']['log_level']));
+
     }
 }

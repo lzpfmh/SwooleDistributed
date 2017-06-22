@@ -1,7 +1,7 @@
 <?php
 /**
  * Created by PhpStorm.
- * User: tmtbe
+ * User: zhangjincheng
  * Date: 16-7-29
  * Time: 上午11:05
  */
@@ -29,6 +29,12 @@ class Child
     public $child_list = [];
 
     /**
+     * 上下文
+     * @var array
+     */
+    protected $context = [];
+
+    /**
      * 加入一个插件
      * @param $child Child
      */
@@ -54,7 +60,7 @@ class Child
      */
     public function hasChild($name)
     {
-        return key_exists($name, $this->child_list);
+        return array_key_exists($name, $this->child_list);
     }
 
     /**
@@ -68,6 +74,24 @@ class Child
     }
 
     /**
+     * 获取上下文
+     * @return array
+     */
+    public function &getContext()
+    {
+        return $this->context;
+    }
+
+    /**
+     * 设置上下文
+     * @param $context
+     */
+    public function setContext(&$context)
+    {
+        $this->context = &$context;
+    }
+
+    /**
      * 销毁，解除引用
      */
     public function destroy()
@@ -76,7 +100,8 @@ class Child
             $core_child->destroy();
         }
         $this->child_list = [];
-        unset($this->parent);
+        $this->parent = null;
+        $this->context = [];
     }
 
 }

@@ -1,12 +1,14 @@
 <?php
 /**
  * Created by PhpStorm.
- * User: tmtbe
+ * User: zhangjincheng
  * Date: 16-7-15
  * Time: 下午2:43
  */
 
 namespace Server\Pack;
+
+use Server\CoreBase\SwooleException;
 
 class JsonPack implements IPack
 {
@@ -17,6 +19,10 @@ class JsonPack implements IPack
 
     public function unPack($data)
     {
-        return json_decode($data);
+        $value = json_decode($data);
+        if (empty($value)) {
+            throw new SwooleException('json unPack 失败');
+        }
+        return $value;
     }
 }

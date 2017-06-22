@@ -8,7 +8,7 @@ use Server\CoreBase\Controller;
 
 /**
  * Created by PhpStorm.
- * User: tmtbe
+ * User: zhangjincheng
  * Date: 16-7-15
  * Time: 下午3:51
  */
@@ -24,7 +24,7 @@ class ProtoController extends Controller
      * @param AbstractMessage $responseMessage
      * @return String
      */
-    public function makeMessageData(AbstractMessage $responseMessage)
+    protected function makeMessageData(AbstractMessage $responseMessage)
     {
         $cmdMethod = $responseMessage->getCmdMethod();
         $cmdService = $responseMessage->getCmdService();

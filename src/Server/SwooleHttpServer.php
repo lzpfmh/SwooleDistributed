@@ -2,7 +2,7 @@
 /**
  * 包含http服务器
  * Created by PhpStorm.
- * User: tmtbe
+ * User: zhangjincheng
  * Date: 16-7-29
  * Time: 上午9:42
  */
@@ -12,7 +12,7 @@ namespace Server;
 
 use League\Plates\Engine;
 use Server\CoreBase\ControllerFactory;
-use Server\CoreBase\GeneratorContext;
+use Server\Coroutine\Coroutine;
 
 abstract class SwooleHttpServer extends SwooleServer
 {
@@ -114,7 +114,6 @@ abstract class SwooleHttpServer extends SwooleServer
         $this->templateEngine = new Engine();
         $this->templateEngine->addFolder('server', __DIR__ . '/Views');
         $this->templateEngine->addFolder('app', __DIR__ . '/../app/Views');
-        $this->templateEngine->registerFunction('get_www', 'get_www');
     }
 
     /**
@@ -125,35 +124,54 @@ abstract class SwooleHttpServer extends SwooleServer
     public function onSwooleRequest($request, $response)
     {
         $error_404 = false;
+        $controller_instance = null;
         $this->route->handleClientRequest($request);
-        if ($this->route->getPath() == '/') {
-            $www_path = WWW_DIR . '/' . $this->config->get('http.index', 'index.html');
-            $result = httpEndFile($www_path, $response);
+        list($host) = explode(':', $request->header['host']??'');
+        $path = $this->route->getPath();
+        if($path=='/404'){
+            $response->header('HTTP/1.1', '404 Not Found');
+            if (!isset($this->cache404)) {//内存缓存404页面
+                $template = $this->loader->view('server::error_404');
+                $this->cache404 = $template->render();
+            }
+            $response->end($this->cache404);
+            return;
+        }
+        $extension = pathinfo($this->route->getPath(), PATHINFO_EXTENSION);
+        if ($path=="/") {//寻找主页
+            $www_path = $this->getHostRoot($host) . $this->getHostIndex($host);
+            $result = httpEndFile($www_path, $request, $response);
             if (!$result) {
                 $error_404 = true;
             } else {
                 return;
             }
-        } else {
+        }else if(!empty($extension)){//有后缀
+            $www_path = $this->getHostRoot($host) . $this->route->getPath();
+            $result = httpEndFile($www_path, $request, $response);
+            if (!$result) {
+                $error_404 = true;
+            }
+        }
+        else {
             $controller_name = $this->route->getControllerName();
             $controller_instance = ControllerFactory::getInstance()->getController($controller_name);
             if ($controller_instance != null) {
+                if($this->route->getMethodName()=='_consul_health'){//健康检查
+                    $response->end('ok');
+                    $controller_instance->destroy();
+                    return;
+                }
                 $method_name = $this->config->get('http.method_prefix', '') . $this->route->getMethodName();
-                if (method_exists($controller_instance, $method_name)) {
-                    try {
-                        $controller_instance->setRequestResponse($request, $response);
-                        $generator = call_user_func([$controller_instance, $method_name], $this->route->getParams());
-                        if ($generator instanceof \Generator) {
-                            $generatorContext = new GeneratorContext();
-                            $generatorContext->setController($controller_instance, $controller_name, $method_name);
-                            $this->coroutine->start($generator, $generatorContext);
-                        }
-                        return;
-                    } catch (\Exception $e) {
-                        call_user_func([$controller_instance, 'onExceptionHandle'], $e);
-                    }
-                } else {
-                    $error_404 = true;
+                if (!method_exists($controller_instance, $method_name)) {
+                    $method_name = 'defaultMethod';
+                }
+                try {
+                    $controller_instance->setRequestResponse($request, $response, $controller_name, $method_name);
+                    Coroutine::startCoroutine([$controller_instance, $method_name], $this->route->getParams());
+                    return;
+                } catch (\Exception $e) {
+                    call_user_func([$controller_instance, 'onExceptionHandle'], $e);
                 }
             } else {
                 $error_404 = true;
@@ -163,17 +181,41 @@ abstract class SwooleHttpServer extends SwooleServer
             if ($controller_instance != null) {
                 $controller_instance->destroy();
             }
-            //先根据path找下www目录
-            $www_path = WWW_DIR . $this->route->getPath();
-            $result = httpEndFile($www_path, $response);
-            if (!$result) {
-                $response->header('HTTP/1.1', '404 Not Found');
-                if (!isset($this->cache404)) {//内存缓存404页面
-                    $template = $this->loader->view('server::error_404');
-                    $this->cache404 = $template->render();
-                }
-                $response->end($this->cache404);
-            }
+            //重定向到404
+            $response->status(302);
+            $location = 'http://'.$request->header['host']."/".'404';
+            $response->header('Location',$location);
+            $response->end('');
         }
+    }
+
+    /**
+     * 获得host对应的根目录
+     * @param $host
+     * @return string
+     */
+    public function getHostRoot($host)
+    {
+        $root_path = $this->config['http']['root'][$host]['root']??'';
+        if (empty($root_path)) {
+            $root_path = $this->config['http']['root']['default']['root']??'';
+        }
+        if (!empty($root_path)) {
+            $root_path = WWW_DIR . "/$root_path/";
+        } else {
+            $root_path = WWW_DIR . "/";
+        }
+        return $root_path;
+    }
+
+    /**
+     * 返回host对应的默认文件
+     * @param $host
+     * @return mixed|null
+     */
+    public function getHostIndex($host)
+    {
+        $index = $this->config['http']['root'][$host]['index']??'index.html';
+        return $index;
     }
 }
